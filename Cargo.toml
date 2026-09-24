@@ -1,0 +1,9 @@
+[package]
+name = "png_into_dll"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+png = "0.18.1"
