@@ -44,6 +44,16 @@ impl IconImage {
         (self.width, self.height, self.bit_count)
     }
 
+    /// Decodes the image to `(width, height, rgba)` for display.
+    pub fn to_rgba(&self) -> Result<(u32, u32, Vec<u8>)> {
+        if self.is_png() {
+            let (w, h) = png_dims(&self.data)?;
+            Ok((w, h, decode_png_rgba(&self.data)?))
+        } else {
+            dib_to_rgba(&self.data)
+        }
+    }
+
     /// Directory entries store 256 as 0 in their single-byte size fields.
     fn dir_byte(v: u32) -> u8 {
         if v >= 256 { 0 } else { v as u8 }
@@ -178,6 +188,67 @@ pub fn rgba_to_dib(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&row);
     }
     out
+}
+
+/// Decodes an icon DIB (1/4/8/24/32 bpp, uncompressed) into top-down RGBA,
+/// applying the AND mask as transparency.
+fn dib_to_rgba(dib: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
+    ensure!(dib.len() >= BITMAPINFOHEADER_SIZE as usize, "bitmap header truncated");
+    let header_size = u32_at(dib, 0) as usize;
+    ensure!(header_size >= BITMAPINFOHEADER_SIZE as usize, "unsupported bitmap header");
+    let w = (u32_at(dib, 4) as i32).unsigned_abs() as usize;
+    let h = ((u32_at(dib, 8) as i32).unsigned_abs() / 2) as usize;
+    let bpp = u16_at(dib, 14) as usize;
+    let compression = u32_at(dib, 16);
+    let clr_used = u32_at(dib, 32) as usize;
+    ensure!((1..=256).contains(&w) && (1..=256).contains(&h), "bitmap is {w}x{h}");
+    ensure!(compression == 0 || compression == 3, "compressed bitmaps are not supported");
+    ensure!(matches!(bpp, 1 | 4 | 8 | 24 | 32), "{bpp}bpp bitmaps are not supported");
+
+    let mut offset = header_size;
+    if compression == 3 && header_size == BITMAPINFOHEADER_SIZE as usize {
+        offset += 12; // BI_BITFIELDS masks follow a plain BITMAPINFOHEADER
+    }
+    let palette_len = if bpp <= 8 { if clr_used == 0 { 1 << bpp } else { clr_used } } else { 0 };
+    let palette = dib.get(offset..offset + palette_len * 4).context("bitmap palette truncated")?;
+    offset += palette_len * 4;
+    let xor_stride = (w * bpp).div_ceil(32) * 4;
+    let mask_stride = w.div_ceil(32) * 4;
+    let xor = dib.get(offset..offset + xor_stride * h).context("bitmap pixels truncated")?;
+    // Some icons omit the mask; treat that as fully opaque.
+    let mask = dib.get(offset + xor_stride * h..offset + (xor_stride + mask_stride) * h);
+
+    let mut rgba = vec![0u8; w * h * 4];
+    for y in 0..h {
+        let row = &xor[(h - 1 - y) * xor_stride..][..xor_stride];
+        for x in 0..w {
+            let px = match bpp {
+                32 => [row[x * 4 + 2], row[x * 4 + 1], row[x * 4], row[x * 4 + 3]],
+                24 => [row[x * 3 + 2], row[x * 3 + 1], row[x * 3], 255],
+                _ => {
+                    let bit = x * bpp;
+                    let idx = (row[bit / 8] >> (8 - bpp - bit % 8)) as usize & ((1 << bpp) - 1);
+                    match palette.get(idx * 4..idx * 4 + 3) {
+                        Some(c) => [c[2], c[1], c[0], 255],
+                        None => [0, 0, 0, 255],
+                    }
+                }
+            };
+            rgba[(y * w + x) * 4..][..4].copy_from_slice(&px);
+        }
+    }
+    // 32bpp images carry real alpha; only fall back to the mask when it's all zero.
+    let has_alpha = bpp == 32 && rgba.chunks_exact(4).any(|p| p[3] != 0);
+    if let (false, Some(mask)) = (has_alpha, mask) {
+        for y in 0..h {
+            let row = &mask[(h - 1 - y) * mask_stride..][..mask_stride];
+            for x in 0..w {
+                let transparent = row[x / 8] & (0x80 >> (x % 8)) != 0;
+                rgba[(y * w + x) * 4 + 3] = if transparent { 0 } else { 255 };
+            }
+        }
+    }
+    Ok((w as u32, h as u32, rgba))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +417,35 @@ mod tests {
         // AND mask: bottom row (y=2) starts opaque, so bits 0101010101 -> 0x55, 0x40
         assert_eq!(&dib[160..164], &[0x55, 0x40, 0, 0]);
         assert_eq!(detect_dims(&dib), Some((10, 3)));
+    }
+
+    #[test]
+    fn dib_decode_round_trip() {
+        let rgba = checker(10, 3);
+        let (w, h, back) = dib_to_rgba(&rgba_to_dib(10, 3, &rgba)).unwrap();
+        assert_eq!((w, h), (10, 3));
+        assert_eq!(back, rgba);
+    }
+
+    #[test]
+    fn dib_decode_4bpp_with_mask() {
+        // 2x1, 4bpp: palette[1] = red, palette[2] = blue; second pixel masked out.
+        let mut dib = Vec::new();
+        dib.extend_from_slice(&40u32.to_le_bytes());
+        dib.extend_from_slice(&2i32.to_le_bytes());
+        dib.extend_from_slice(&2i32.to_le_bytes());
+        dib.extend_from_slice(&1u16.to_le_bytes());
+        dib.extend_from_slice(&4u16.to_le_bytes());
+        dib.extend_from_slice(&[0u8; 24]);
+        let mut palette = vec![0u8; 16 * 4];
+        palette[4..8].copy_from_slice(&[0, 0, 255, 0]);
+        palette[8..12].copy_from_slice(&[255, 0, 0, 0]);
+        dib.extend_from_slice(&palette);
+        dib.extend_from_slice(&[0x12, 0, 0, 0]); // XOR row
+        dib.extend_from_slice(&[0x40, 0, 0, 0]); // AND row
+        let (w, h, rgba) = dib_to_rgba(&dib).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba, vec![255, 0, 0, 255, 0, 0, 255, 0]);
     }
 
     #[test]

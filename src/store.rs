@@ -1,24 +1,93 @@
 //! Icon-level view of a DLL's resources.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
-use crate::icon::{IconGroup, build_group_dir, parse_group_dir};
-use crate::pe::{RT_GROUP_ICON, RT_ICON, Resource};
+use crate::icon::{IconGroup, IconImage, build_group_dir, load_image_file, parse_group_dir};
+use crate::pe::{self, RT_GROUP_ICON, RT_ICON, Resource};
 use crate::resid::ResId;
 
 const DEFAULT_LANG: u16 = 0x0409;
 
 /// All resources of a DLL, with icons decoded into [`IconGroup`]s and every
 /// other resource type carried through untouched.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct IconStore {
     pub others: Vec<Resource>,
     pub groups: Vec<IconGroup>,
 }
 
 impl IconStore {
+    /// Reads the icons of any PE file (read-only use: list / extract).
+    pub fn load(path: &Path) -> Result<IconStore> {
+        let image = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        IconStore::from_resources(pe::read_resources(&image)?)
+    }
+
+    /// Loads a DLL that we are about to rewrite; refuses anything but a
+    /// resource-only DLL so that code-bearing files can't be clobbered.
+    pub fn load_writable(path: &Path) -> Result<IconStore> {
+        let image = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+        pe::check_resource_only(&image).with_context(|| path.display().to_string())?;
+        IconStore::from_resources(pe::read_resources(&image)?)
+    }
+
+    /// Writes the DLL via a temporary file so a failure never leaves it half-written.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let image = pe::build_dll(&self.to_resources()?)?;
+        let Some(mut tmp_name) = path.file_name().map(|n| n.to_os_string()) else {
+            bail!("{} is not a file path", path.display())
+        };
+        tmp_name.push(".tmp");
+        let tmp = path.with_file_name(tmp_name);
+        fs::write(&tmp, &image).with_context(|| format!("cannot write {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Adds PNG/ICO files as icons: one icon per file, or a single multi-size
+    /// icon when `group` is set. `id` may only be given when exactly one icon
+    /// results; otherwise fresh integer IDs are assigned. Returns the new IDs.
+    /// On error the store may be partially modified.
+    pub fn add_files(
+        &mut self,
+        files: &[impl AsRef<Path>],
+        group: bool,
+        id: Option<ResId>,
+        keep_png: bool,
+    ) -> Result<Vec<ResId>> {
+        ensure!(!files.is_empty(), "no files to add");
+        let mut batches: Vec<Vec<IconImage>> = Vec::new();
+        if group {
+            let mut images = Vec::new();
+            for f in files {
+                images.extend(load_image_file(f.as_ref(), keep_png)?);
+            }
+            batches.push(images);
+        } else {
+            for f in files {
+                batches.push(load_image_file(f.as_ref(), keep_png)?);
+            }
+        }
+        ensure!(
+            id.is_none() || batches.len() == 1,
+            "an explicit ID can only be used when adding a single icon (combine the files into one icon)"
+        );
+        let mut added = Vec::new();
+        for images in batches {
+            let gid = match &id {
+                Some(id) => id.clone(),
+                None => ResId::Id(self.next_group_id()?),
+            };
+            self.add(IconGroup { id: gid.clone(), lang: 0, images })?;
+            added.push(gid);
+        }
+        Ok(added)
+    }
+
     pub fn from_resources(resources: Vec<Resource>) -> Result<IconStore> {
         let mut icons: BTreeMap<(u16, u16), Vec<u8>> = BTreeMap::new();
         let mut group_res = Vec::new();

@@ -1,7 +1,7 @@
 # png_into_dll
 
 `.png` ファイルを Windows のアイコンリソース (`RT_GROUP_ICON` / `RT_ICON`) として
-`.dll` に格納するコマンドラインツールです。作成した DLL には後から `.png` / `.ico` を
+`.dll` に格納するツールです (GUI / コマンドライン)。作成した DLL には後から `.png` / `.ico` を
 追加・削除でき、ショートカットやレジストリのアイコン指定 (`icons.dll,-1` など) や
 Windows の「アイコンの変更」ダイアログからそのまま利用できます。
 
@@ -16,9 +16,27 @@ cargo build --release
 
 `target/release/png_into_dll.exe` が生成されます。
 
-## 使い方
+## GUI
+
+引数なしで起動する (エクスプローラーからダブルクリックする) と GUI が開きます。
+`png_into_dll gui icons.dll` で DLL を指定して開くこともできます。
+
+- **新規作成… / 開く…** で DLL を選択します。DLL/EXE をウィンドウにドロップしても開けます。
+- **ファイルを追加…** または PNG / ICO をウィンドウへ **ドラッグ & ドロップ** すると
+  アイコンとして追加されます。DLL を開いていなければ保存先を聞いて新規作成します。
+  - 「複数ファイルを 1 つのアイコンにまとめる」 = `--group`
+  - 「PNG のまま格納」 = `--keep-png`
+  - 「ID / 名前」 = `--id` (空欄なら自動採番)
+- 一覧でアイコンを選ぶと右側に全サイズのプレビューが表示され、
+  **.ico として保存…** (一覧のダブルクリックでも可)・**削除** (Delete キーでも可)・
+  ショートカット等に使える参照文字列 (`C:\path\icons.dll,-1`) のコピーができます。
+- 追加・削除はその場で DLL に保存されます。
+- このツールで作成したもの以外の DLL/EXE は読み取り専用で開きます (閲覧と .ico 保存のみ)。
+
+## コマンドライン
 
 ```
+png_into_dll [gui [<dll>]]
 png_into_dll create  <dll> [--force]
 png_into_dll add     <dll> <files...> [--group] [--id <ID|NAME>] [--keep-png]
 png_into_dll list    <dll>
@@ -91,7 +109,8 @@ cargo clippy --all-targets
 | ファイル | 内容 |
 |---|---|
 | `src/pe.rs` | PE の読み込み (PE32/PE32+) と、x64 リソース専用 DLL の生成 |
-| `src/icon.rs` | PNG/ICO の読み込み、DIB 変換、`GRPICONDIR` / `.ico` の入出力 |
-| `src/store.rs` | DLL 内リソースのアイコン単位での追加・削除・再構成 |
+| `src/icon.rs` | PNG/ICO の読み込み、DIB 変換 (相互)、`GRPICONDIR` / `.ico` の入出力 |
+| `src/store.rs` | DLL の読み書きと、アイコン単位での追加・削除・再構成 |
 | `src/resid.rs` | リソース ID (整数 / 文字列) と PE 内での並び順 |
 | `src/main.rs` | CLI |
+| `src/gui.rs` | GUI (egui / eframe) |

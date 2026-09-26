@@ -1,29 +1,40 @@
 //! png_into_dll: store PNG images as Windows icon resources in a .dll file.
 
+mod gui;
 mod icon;
 mod pe;
 mod resid;
 mod store;
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 
-use icon::{IconGroup, load_image_file, to_ico};
+use icon::to_ico;
 use resid::ResId;
 use store::IconStore;
 
 #[derive(Parser)]
-#[command(name = "png_into_dll", version, about = "Store PNG images as Windows icon resources in a .dll file")]
+#[command(
+    name = "png_into_dll",
+    version,
+    about = "Store PNG images as Windows icon resources in a .dll file",
+    after_help = "Run without a command to open the GUI."
+)]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Open the graphical interface (the default when no command is given)
+    Gui {
+        /// DLL to open at startup
+        dll: Option<PathBuf>,
+    },
     /// Create an empty icon DLL
     Create {
         dll: PathBuf,
@@ -65,54 +76,39 @@ enum Cmd {
 }
 
 fn main() {
-    if let Err(e) = run(Cli::parse()) {
+    let result = match Cli::parse().cmd {
+        None => gui::run(None),
+        Some(Cmd::Gui { dll }) => gui::run(dll),
+        Some(cmd) => run(cmd),
+    };
+    if let Err(e) = result {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    match cli.cmd {
+fn run(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Gui { .. } => unreachable!("handled in main"),
         Cmd::Create { dll, force } => {
             ensure!(force || !dll.exists(), "{} already exists (use --force to overwrite)", dll.display());
-            save(&dll, &IconStore::default())?;
+            IconStore::default().save(&dll)?;
             println!("created {}", dll.display());
         }
         Cmd::Add { dll, files, group, id, keep_png } => {
-            let mut store = if dll.exists() { load_writable(&dll)? } else { IconStore::default() };
-            let mut batches: Vec<Vec<icon::IconImage>> = Vec::new();
-            if group {
-                let mut images = Vec::new();
-                for f in &files {
-                    images.extend(load_image_file(f, keep_png)?);
-                }
-                batches.push(images);
-            } else {
-                for f in &files {
-                    batches.push(load_image_file(f, keep_png)?);
-                }
-            }
+            let mut store = if dll.exists() { IconStore::load_writable(&dll)? } else { IconStore::default() };
             let id = id.as_deref().map(ResId::parse).transpose()?;
-            if id.is_some() {
-                ensure!(
-                    batches.len() == 1,
-                    "--id can only be used when adding a single icon (use --group to combine files)"
-                );
+            if id.is_some() && !group && files.len() > 1 {
+                anyhow::bail!("--id can only be used when adding a single icon (use --group to combine files)");
             }
-            for images in batches {
-                let gid = match &id {
-                    Some(id) => id.clone(),
-                    None => ResId::Id(store.next_group_id()?),
-                };
-                store.add(IconGroup { id: gid.clone(), lang: 0, images })?;
+            for gid in store.add_files(&files, group, id, keep_png)? {
                 let g = &store.groups[store.find(&gid).expect("just added")];
                 println!("added icon {gid}: {}", g.describe());
             }
-            save(&dll, &store)?;
+            store.save(&dll)?;
         }
         Cmd::List { dll } => {
-            let image = fs::read(&dll).with_context(|| format!("cannot read {}", dll.display()))?;
-            let store = IconStore::from_resources(pe::read_resources(&image)?)?;
+            let store = IconStore::load(&dll)?;
             if store.groups.is_empty() {
                 println!("no icons in {}", dll.display());
             } else {
@@ -126,16 +122,15 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Remove { dll, ids } => {
-            let mut store = load_writable(&dll)?;
+            let mut store = IconStore::load_writable(&dll)?;
             for id in &ids {
                 let g = store.remove(&ResId::parse(id)?)?;
                 println!("removed icon {}: {}", g.id, g.describe());
             }
-            save(&dll, &store)?;
+            store.save(&dll)?;
         }
         Cmd::Extract { dll, id, out } => {
-            let image = fs::read(&dll).with_context(|| format!("cannot read {}", dll.display()))?;
-            let store = IconStore::from_resources(pe::read_resources(&image)?)?;
+            let store = IconStore::load(&dll)?;
             let id = ResId::parse(&id)?;
             let idx = store.find(&id).ok_or_else(|| anyhow::anyhow!("icon {id} not found"))?;
             let g = &store.groups[idx];
@@ -144,25 +139,5 @@ fn run(cli: Cli) -> Result<()> {
             println!("extracted icon {id} ({}) to {}", g.describe(), out.display());
         }
     }
-    Ok(())
-}
-
-/// Loads a DLL that we are about to rewrite; refuses anything but a
-/// resource-only DLL so that code-bearing files can't be clobbered.
-fn load_writable(dll: &Path) -> Result<IconStore> {
-    let image = fs::read(dll).with_context(|| format!("cannot read {}", dll.display()))?;
-    pe::check_resource_only(&image).with_context(|| dll.display().to_string())?;
-    IconStore::from_resources(pe::read_resources(&image)?)
-}
-
-/// Writes the DLL via a temporary file so a failure never leaves it half-written.
-fn save(dll: &Path, store: &IconStore) -> Result<()> {
-    let image = pe::build_dll(&store.to_resources()?)?;
-    let file_name = dll.file_name().map(|n| n.to_os_string());
-    let Some(mut tmp_name) = file_name else { bail!("{} is not a file path", dll.display()) };
-    tmp_name.push(".tmp");
-    let tmp = dll.with_file_name(tmp_name);
-    fs::write(&tmp, &image).with_context(|| format!("cannot write {}", tmp.display()))?;
-    fs::rename(&tmp, dll).with_context(|| format!("cannot replace {}", dll.display()))?;
     Ok(())
 }
