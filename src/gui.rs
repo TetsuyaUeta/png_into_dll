@@ -320,7 +320,7 @@ impl App {
                 }
             }
         });
-        ui.add_space(2.0);
+        ui.separator();
         ui.horizontal(|ui| {
             let can_add = self.path.is_none() || self.writable;
             if ui.add_enabled(can_add, egui::Button::new("ファイルを追加…")).clicked() {
