@@ -7,6 +7,9 @@
 //! shortcut using a later icon would suddenly show a different image. We scan
 //! the usual shortcut folders and rewrite the index stored in the .lnk header.
 //! Negative indices name a resource ID directly and never need fixing.
+//! Shortcuts whose icon was removed are pointed at [`BLANK_INDEX`], an index
+//! that can never exist, so Explorer shows an empty icon instead of whatever
+//! icon happens to take over the old position.
 
 use std::path::Path;
 
@@ -15,8 +18,8 @@ use std::path::Path;
 pub struct ShortcutReport {
     /// Shortcuts whose icon index was rewritten.
     pub updated: usize,
-    /// Shortcuts that used an icon that no longer exists (left unchanged).
-    pub orphaned: usize,
+    /// Shortcuts that used a removed icon and now show an empty icon.
+    pub blanked: usize,
     /// Shortcuts that needed a fix but could not be written.
     pub failed: usize,
 }
@@ -28,8 +31,8 @@ impl ShortcutReport {
         if self.updated > 0 {
             parts.push(format!("ショートカット {} 件のアイコン番号を更新", self.updated));
         }
-        if self.orphaned > 0 {
-            parts.push(format!("削除したアイコンを使っていたショートカット {} 件", self.orphaned));
+        if self.blanked > 0 {
+            parts.push(format!("削除したアイコンを使っていたショートカット {} 件を空のアイコンに変更", self.blanked));
         }
         if self.failed > 0 {
             parts.push(format!("更新できなかったショートカット {} 件", self.failed));
@@ -42,8 +45,8 @@ impl ShortcutReport {
         if self.updated > 0 {
             parts.push(format!("updated icon index of {} shortcut(s)", self.updated));
         }
-        if self.orphaned > 0 {
-            parts.push(format!("{} shortcut(s) used a removed icon", self.orphaned));
+        if self.blanked > 0 {
+            parts.push(format!("{} shortcut(s) used a removed icon and now show an empty icon", self.blanked));
         }
         if self.failed > 0 {
             parts.push(format!("{} shortcut(s) could not be updated", self.failed));
@@ -51,6 +54,11 @@ impl ShortcutReport {
         (!parts.is_empty()).then(|| parts.join(", "))
     }
 }
+
+/// Icon index for shortcuts whose icon was removed. No DLL holds this many
+/// icons, so the lookup fails and Explorer draws an empty (blank page) icon.
+/// It is also past the end of any remap table, so later saves leave it alone.
+pub const BLANK_INDEX: i32 = i32::MAX;
 
 const HEADER_SIZE: usize = 0x4C;
 const ICON_INDEX_OFFSET: usize = 0x38;
@@ -143,7 +151,8 @@ pub fn set_icon_index(lnk: &mut [u8], index: i32) {
 }
 
 /// Rewrites every shortcut that uses `dll`: icon index `i` becomes
-/// `remap[i]`; `None` means that icon was removed.
+/// `remap[i]`; `None` means that icon was removed, and the shortcut is
+/// switched to an empty icon ([`BLANK_INDEX`]).
 #[cfg(windows)]
 pub fn fix_shortcuts(dll: &Path, remap: &[Option<usize>]) -> ShortcutReport {
     let mut report = ShortcutReport::default();
@@ -164,18 +173,17 @@ pub fn fix_shortcuts(dll: &Path, remap: &[Option<usize>]) -> ShortcutReport {
         if normalize(Path::new(&expanded)).as_deref() != Some(target.as_str()) {
             continue;
         }
-        match remap.get(index as usize) {
-            Some(Some(new)) if *new != index as usize => {
-                set_icon_index(&mut data, *new as i32);
-                if std::fs::write(&lnk_path, &data).is_ok() {
-                    report.updated += 1;
-                    win::notify_updated(&lnk_path);
-                } else {
-                    report.failed += 1;
-                }
-            }
-            Some(None) => report.orphaned += 1,
-            _ => {}
+        let (new_index, counter) = match remap.get(index as usize) {
+            Some(Some(new)) if *new != index as usize => (*new as i32, &mut report.updated),
+            Some(None) => (BLANK_INDEX, &mut report.blanked),
+            _ => continue,
+        };
+        set_icon_index(&mut data, new_index);
+        if std::fs::write(&lnk_path, &data).is_ok() {
+            *counter += 1;
+            win::notify_updated(&lnk_path);
+        } else {
+            report.failed += 1;
         }
     }
     report
