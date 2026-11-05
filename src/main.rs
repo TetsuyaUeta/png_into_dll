@@ -4,6 +4,7 @@ mod gui;
 mod icon;
 mod pe;
 mod resid;
+mod shortcut;
 mod store;
 
 use std::fs;
@@ -87,6 +88,12 @@ fn main() {
     }
 }
 
+fn report_shortcuts(report: shortcut::ShortcutReport) {
+    if let Some(s) = report.summary_en() {
+        println!("{s}");
+    }
+}
+
 fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Gui { .. } => unreachable!("handled in main"),
@@ -105,7 +112,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 let g = &store.groups[store.find(&gid).expect("just added")];
                 println!("added icon {gid}: {}", g.describe());
             }
-            store.save(&dll)?;
+            report_shortcuts(store.save(&dll)?);
         }
         Cmd::List { dll } => {
             let store = IconStore::load(&dll)?;
@@ -127,7 +134,7 @@ fn run(cmd: Cmd) -> Result<()> {
                 let g = store.remove(&ResId::parse(id)?)?;
                 println!("removed icon {}: {}", g.id, g.describe());
             }
-            store.save(&dll)?;
+            report_shortcuts(store.save(&dll)?);
         }
         Cmd::Extract { dll, id, out } => {
             let store = IconStore::load(&dll)?;

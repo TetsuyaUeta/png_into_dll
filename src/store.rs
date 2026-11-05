@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use crate::icon::{IconGroup, IconImage, build_group_dir, load_image_file, parse_group_dir};
 use crate::pe::{self, RT_GROUP_ICON, RT_ICON, Resource};
 use crate::resid::ResId;
+use crate::shortcut::{self, ShortcutReport};
 
 const DEFAULT_LANG: u16 = 0x0409;
 
@@ -35,9 +36,14 @@ impl IconStore {
         IconStore::from_resources(pe::read_resources(&image)?)
     }
 
-    /// Writes the DLL via a temporary file so a failure never leaves it half-written.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    /// Writes the DLL via a temporary file so a failure never leaves it
+    /// half-written, then repoints shortcuts whose icon index shifted.
+    pub fn save(&self, path: &Path) -> Result<ShortcutReport> {
         let image = pe::build_dll(&self.to_resources()?)?;
+        // Icon order of the file being replaced, to see how indices move.
+        let old_ids: Vec<ResId> = IconStore::load(path)
+            .map(|s| s.groups.into_iter().map(|g| g.id).collect())
+            .unwrap_or_default();
         let Some(mut tmp_name) = path.file_name().map(|n| n.to_os_string()) else {
             bail!("{} is not a file path", path.display())
         };
@@ -45,8 +51,14 @@ impl IconStore {
         let tmp = path.with_file_name(tmp_name);
         fs::write(&tmp, &image).with_context(|| format!("cannot write {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+        let remap: Vec<Option<usize>> = old_ids.iter().map(|id| self.find(id)).collect();
+        let report = if remap.iter().enumerate().all(|(i, n)| *n == Some(i)) {
+            ShortcutReport::default()
+        } else {
+            shortcut::fix_shortcuts(path, &remap)
+        };
         self.refresh_shell_icons(path);
-        Ok(())
+        Ok(report)
     }
 
     /// Explorer caches icons by `(path, index)` and does not notice that the

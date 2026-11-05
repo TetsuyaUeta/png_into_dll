@@ -11,4 +11,4 @@ png = "0.18.1"
 rfd = "0.17.2"
 
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Console", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Com", "Win32_System_Console", "Win32_System_Environment", "Win32_UI_Shell"] }

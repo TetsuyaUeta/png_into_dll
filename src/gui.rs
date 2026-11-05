@@ -11,6 +11,7 @@ use eframe::egui::{self, Color32, RichText, Sense, TextureHandle, TextureOptions
 
 use crate::icon::{IconGroup, IconImage, to_ico};
 use crate::resid::ResId;
+use crate::shortcut::ShortcutReport;
 use crate::store::IconStore;
 
 const THUMB: f32 = 32.0;
@@ -102,6 +103,14 @@ struct App {
     status: Option<Status>,
 }
 
+/// Appends what happened to shortcuts (if anything) to a status message.
+fn with_report(msg: String, report: &ShortcutReport) -> String {
+    match report.summary_ja() {
+        Some(s) => format!("{msg} ({s})"),
+        None => msg,
+    }
+}
+
 impl App {
     fn info(&mut self, text: impl Into<String>) {
         self.status = Some(Status { text: text.into(), error: false });
@@ -164,7 +173,7 @@ impl App {
             return false;
         };
         match IconStore::default().save(&path) {
-            Ok(()) => {
+            Ok(_) => {
                 self.writable = true;
                 self.set_store(IconStore::default(), None);
                 self.info(format!("{} を作成しました", path.display()));
@@ -219,15 +228,15 @@ impl App {
             let id = if id_text.is_empty() { None } else { Some(ResId::parse(id_text)?) };
             let mut store = self.store.clone();
             let added = store.add_files(files, self.group_files, id, self.keep_png)?;
-            store.save(&path)?;
-            Ok::<_, anyhow::Error>((store, added))
+            let report = store.save(&path)?;
+            Ok::<_, anyhow::Error>((store, added, report))
         })();
         match result {
-            Ok((store, added)) => {
+            Ok((store, added, report)) => {
                 let ids = added.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
                 self.set_store(store, added.last());
                 self.id_text.clear();
-                self.info(format!("アイコン {ids} を追加しました"));
+                self.info(with_report(format!("アイコン {ids} を追加しました"), &report));
             }
             Err(e) => self.error("追加できませんでした", e),
         }
@@ -238,10 +247,10 @@ impl App {
         let mut store = self.store.clone();
         let group = store.groups.remove(idx);
         match store.save(&path) {
-            Ok(()) => {
+            Ok(report) => {
                 let next = store.groups.get(idx.min(store.groups.len().saturating_sub(1))).map(|g| g.id.clone());
                 self.set_store(store, next.as_ref());
-                self.info(format!("アイコン {} を削除しました", group.id));
+                self.info(with_report(format!("アイコン {} を削除しました", group.id), &report));
             }
             Err(e) => self.error("削除できませんでした", e),
         }
