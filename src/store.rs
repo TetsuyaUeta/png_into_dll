@@ -45,8 +45,28 @@ impl IconStore {
         let tmp = path.with_file_name(tmp_name);
         fs::write(&tmp, &image).with_context(|| format!("cannot write {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+        self.refresh_shell_icons(path);
         Ok(())
     }
+
+    /// Explorer caches icons by `(path, index)` and does not notice that the
+    /// DLL changed. After removing an icon the positions shift, so a shortcut
+    /// pointing at `path,N` keeps showing the stale cached image of the old
+    /// index N even though the Properties dialog (which reads the file fresh)
+    /// shows the right one. Per-entry invalidation is unreliable (the cache key
+    /// also includes flags we can't know, and the old last index is no longer
+    /// in `self.groups`), so ask the shell to flush its whole icon cache.
+    #[cfg(windows)]
+    fn refresh_shell_icons(&self, _path: &Path) {
+        use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+        // SAFETY: SHCNE_ASSOCCHANGED takes no items; both pointers must be null.
+        unsafe {
+            SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, std::ptr::null(), std::ptr::null());
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn refresh_shell_icons(&self, _path: &Path) {}
 
     /// Adds PNG/ICO files as icons: one icon per file, or a single multi-size
     /// icon when `group` is set. `id` may only be given when exactly one icon
