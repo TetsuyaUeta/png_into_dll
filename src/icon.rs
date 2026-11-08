@@ -54,6 +54,16 @@ impl IconImage {
         }
     }
 
+    /// Encodes the image as a standalone PNG file. PNG entries are returned
+    /// as-is; DIB entries are decoded (alpha or AND mask applied) and encoded.
+    pub fn to_png(&self) -> Result<Vec<u8>> {
+        if self.is_png() {
+            return Ok(self.data.clone());
+        }
+        let (w, h, rgba) = self.to_rgba()?;
+        encode_png_rgba(w, h, &rgba)
+    }
+
     /// Directory entries store 256 as 0 in their single-byte size fields.
     fn dir_byte(v: u32) -> u8 {
         if v >= 256 { 0 } else { v as u8 }
@@ -69,6 +79,29 @@ pub struct IconGroup {
 }
 
 impl IconGroup {
+    /// The image whose width and height are both `size`; when several match
+    /// (different color depths), the one with the most bits per pixel.
+    pub fn image_of_size(&self, size: u32) -> Option<&IconImage> {
+        self.images
+            .iter()
+            .filter(|i| i.width == size && i.height == size)
+            .max_by_key(|i| (i.bit_count, i.is_png()))
+    }
+
+    /// The largest image (by area, then color depth).
+    pub fn largest_image(&self) -> Option<&IconImage> {
+        self.images.iter().max_by_key(|i| (i.width * i.height, i.bit_count, i.is_png()))
+    }
+
+    /// Distinct square sizes available, e.g. `16, 32, 256`, for messages.
+    pub fn sizes(&self) -> String {
+        let mut v: Vec<String> = self.images.iter().map(|i| {
+            if i.width == i.height { i.width.to_string() } else { format!("{}x{}", i.width, i.height) }
+        }).collect();
+        v.dedup();
+        v.join(", ")
+    }
+
     pub fn describe(&self) -> String {
         self.images
             .iter()
@@ -154,6 +187,19 @@ fn decode_png_rgba(png: &[u8]) -> Result<Vec<u8>> {
         }
     }
     Ok(rgba)
+}
+
+/// Encodes tightly packed 8-bit RGBA as a PNG file.
+fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut w = enc.write_header().context("PNG encode failed")?;
+        w.write_image_data(rgba).context("PNG encode failed")?;
+    }
+    Ok(out)
 }
 
 /// Encodes RGBA pixels as a 32bpp icon DIB: BITMAPINFOHEADER (height doubled),
@@ -480,6 +526,16 @@ mod tests {
         assert_eq!(dir.len(), 6 + 14 * 2);
         let got = parse_group_dir(&dir, |id| (id == 8).then(|| img.data.clone())).unwrap();
         assert_eq!(got, vec![img]);
+    }
+
+    #[test]
+    fn dib_to_png_round_trip() {
+        let rgba: Vec<u8> = (0..4 * 3 * 4).map(|i| (i * 5) as u8).collect();
+        let img = IconImage { width: 4, height: 3, color_count: 0, planes: 1, bit_count: 32, data: rgba_to_dib(4, 3, &rgba) };
+        let png = img.to_png().unwrap();
+        assert!(png.starts_with(PNG_SIG));
+        assert_eq!(png_dims(&png).unwrap(), (4, 3));
+        assert_eq!(decode_png_rgba(&png).unwrap(), img.to_rgba().unwrap().2);
     }
 
     #[test]

@@ -259,7 +259,7 @@ impl App {
     fn extract_selected(&mut self) {
         let Some(group) = self.selected_group().cloned() else { return };
         let Some(out) = rfd::FileDialog::new()
-            .set_title(".ico として保存")
+            .set_title("全サイズを .ico で保存")
             .add_filter("ICO", &["ico"])
             .set_file_name(format!("{}.ico", group.id))
             .save_file()
@@ -269,6 +269,26 @@ impl App {
         match fs::write(&out, to_ico(&group.images)) {
             Ok(()) => self.info(format!("{} に保存しました", out.display())),
             Err(e) => self.error("保存できませんでした", e.into()),
+        }
+    }
+
+    /// Saves one image of the selected icon as a single-size .ico or a .png.
+    fn extract_image(&mut self, image: usize, as_png: bool) {
+        let Some(group) = self.selected_group().cloned() else { return };
+        let Some(img) = group.images.get(image) else { return };
+        let (label, ext) = if as_png { ("PNG", "png") } else { ("ICO", "ico") };
+        let Some(out) = rfd::FileDialog::new()
+            .set_title(format!("{} を .{ext} として保存", img.describe()))
+            .add_filter(label, &[ext])
+            .set_file_name(format!("{}_{}x{}.{ext}", group.id, img.width, img.height))
+            .save_file()
+        else {
+            return;
+        };
+        let bytes = if as_png { img.to_png() } else { Ok(to_ico(std::slice::from_ref(img))) };
+        match bytes.and_then(|b| fs::write(&out, b).map_err(Into::into)) {
+            Ok(()) => self.info(format!("{} に保存しました", out.display())),
+            Err(e) => self.error("保存できませんでした", e),
         }
     }
 
@@ -441,7 +461,7 @@ impl App {
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button(".ico として保存…").clicked() {
+            if ui.button("全サイズを .ico で保存…").clicked() {
                 self.extract_selected();
             }
             if ui.add_enabled(self.writable, egui::Button::new("削除")).clicked() {
@@ -451,8 +471,9 @@ impl App {
         ui.separator();
 
         let group = &self.store.groups[idx];
+        let mut save_image: Option<(usize, bool)> = None;
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for (img, tex) in group.images.iter().zip(&textures) {
+            for (i, (img, tex)) in group.images.iter().zip(&textures).enumerate() {
                 let size = Vec2::new(img.width as f32, img.height as f32);
                 let shown = size * (DETAIL_MAX / size.max_elem()).min(1.0);
                 egui::Frame::new()
@@ -467,10 +488,21 @@ impl App {
                             ui.weak("(プレビュー不可)");
                         }
                     });
-                ui.label(img.describe());
+                ui.horizontal(|ui| {
+                    ui.label(img.describe());
+                    if ui.small_button("PNG 保存…").clicked() {
+                        save_image = Some((i, true));
+                    }
+                    if ui.small_button(".ico 保存…").clicked() {
+                        save_image = Some((i, false));
+                    }
+                });
                 ui.add_space(6.0);
             }
         });
+        if let Some((i, as_png)) = save_image {
+            self.extract_image(i, as_png);
+        }
     }
 
     fn confirm_dialog(&mut self, ctx: &egui::Context) {

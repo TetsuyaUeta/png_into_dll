@@ -28,8 +28,9 @@ cargo build --release
   - 「PNG のまま格納」 = `--keep-png`
   - 「ID / 名前」 = `--id` (空欄なら自動採番)
 - 一覧でアイコンを選ぶと右側に全サイズのプレビューが表示され、
-  **.ico として保存…** (一覧のダブルクリックでも可)・**削除** (Delete キーでも可)・
+  **全サイズを .ico で保存…** (一覧のダブルクリックでも可)・**削除** (Delete キーでも可)・
   ショートカット等に使える参照文字列 (`C:\path\icons.dll,-1`) のコピーができます。
+  各サイズのプレビュー横の **PNG 保存…** / **.ico 保存…** で、そのサイズだけを保存できます。
 - 追加・削除はその場で DLL に保存されます。
 - このツールで作成したもの以外の DLL/EXE は読み取り専用で開きます (閲覧と .ico 保存のみ)。
 
@@ -41,7 +42,7 @@ png_into_dll create  <dll> [--force]
 png_into_dll add     <dll> <files...> [--group] [--id <ID|NAME>] [--keep-png]
 png_into_dll list    <dll>
 png_into_dll remove  <dll> <ID|NAME>...
-png_into_dll extract <dll> <ID|NAME> <out.ico>
+png_into_dll extract <dll> <ID|NAME> <out.ico|out.png> [--size <PX>]
 ```
 
 ### 例
@@ -72,6 +73,12 @@ png_into_dll list icons.dll
 # 削除 / .ico として取り出し
 png_into_dll remove icons.dll 1 100
 png_into_dll extract icons.dll APP app.ico
+
+# 1 サイズだけ取り出す (拡張子 .png なら PNG、.ico なら 1 サイズだけの ICO)
+png_into_dll extract icons.dll APP app256.png --size 256
+png_into_dll extract icons.dll APP app16.ico --size 16
+# .png で --size を省略すると最大サイズを取り出す
+png_into_dll extract icons.dll APP app.png
 ```
 
 ### 格納形式
@@ -97,6 +104,8 @@ Windows でアイコンを指定する `"path,index"` 形式では:
 - `add` / `remove` で書き換えられるのは、このツールで作成したリソース専用 DLL のみです
   (`.rsrc` セクション以外を持つ DLL/EXE は破壊を防ぐため拒否します)。
   `list` / `extract` は任意の PE ファイルに対して使えます。
+- `shell32.dll` などアイコンが `%SystemRoot%\SystemResources\*.mun` に分離されている
+  システム DLL は、読み取り時に自動的に `.mun` 側のアイコンを読みます。
 - アイコン以外のリソース (バージョン情報など) が DLL にあればそのまま保持されます。
 
 ## 開発
