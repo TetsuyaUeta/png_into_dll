@@ -23,9 +23,25 @@ pub struct IconStore {
 
 impl IconStore {
     /// Reads the icons of any PE file (read-only use: list / extract).
+    ///
+    /// Since Windows 10 1903 many system DLLs (shell32.dll, imageres.dll, …)
+    /// keep their icons in `%SystemRoot%\SystemResources\<name>.mun` and the
+    /// loader redirects to it transparently. When the file itself holds no
+    /// icons and such a `.mun` exists, its icons are read instead, so that
+    /// listing and extracting see what Explorer shows for `path,N`.
     pub fn load(path: &Path) -> Result<IconStore> {
         let image = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-        IconStore::from_resources(pe::read_resources(&image)?)
+        let store = IconStore::from_resources(pe::read_resources(&image)?)?;
+        if store.groups.is_empty()
+            && let Some(mun) = mun_path(path).filter(|p| p.is_file())
+            && let Ok(mun_store) = fs::read(&mun)
+                .map_err(anyhow::Error::from)
+                .and_then(|img| IconStore::from_resources(pe::read_resources(&img)?))
+            && !mun_store.groups.is_empty()
+        {
+            return Ok(mun_store);
+        }
+        Ok(store)
     }
 
     /// Loads a DLL that we are about to rewrite; refuses anything but a
@@ -214,6 +230,15 @@ impl IconStore {
             .ok_or_else(|| anyhow::anyhow!("icon {id} not found"))?;
         Ok(self.groups.remove(idx))
     }
+}
+
+/// `%SystemRoot%\SystemResources\<file name>.mun`, where Windows keeps the
+/// resources of system DLLs whose icons were split out of the binary.
+fn mun_path(path: &Path) -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("SystemRoot").or_else(|| std::env::var_os("windir"))?;
+    let mut name = path.file_name()?.to_os_string();
+    name.push(".mun");
+    Some(Path::new(&root).join("SystemResources").join(name))
 }
 
 #[cfg(test)]
